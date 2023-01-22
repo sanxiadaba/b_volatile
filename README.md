@@ -1,5 +1,5 @@
 # volatile细节知多少
-- B站视频：
+- B站视频：[98%开发者不了解的volatile关键字_哔哩哔哩_bilibili](https://www.bilibili.com/video/BV1SY4y1d7sv/?vd_source=5b90b82c89d852d98d402593e8fed710)
 
 - 参考资料：
 
