@@ -1,42 +1,73 @@
-# volatile细节知多少
-- B站视频：[98%开发者不了解的volatile关键字_哔哩哔哩_bilibili](https://www.bilibili.com/video/BV1SY4y1d7sv/?vd_source=5b90b82c89d852d98d402593e8fed710)
+# Store Buffering 与 volatile 语义实验
 
-- 参考资料：
+这个项目用经典的 Store Buffering litmus test 比较 C 和 Java 的并发内存语义：
 
-1. jsr133文档
-2. ansi-iso-9899-1990 （C89标准）
+```text
+初始状态：a = 0, b = 0
 
-- 参考链接：
+线程 1                 线程 2
+a = 1                  b = 1
+x = b                  y = a
+```
 
-1. [指令重排序、内存屏障很难？看完这篇你就懂了！ - 掘金 (juejin.cn)](https://juejin.cn/post/6901283327160877063)
-2. [谈谈 C/C++ 中的 volatile - 知乎 (zhihu.com)](https://zhuanlan.zhihu.com/p/33074506)
+在严格顺序一致性（sequential consistency）下，`x = 0, y = 0` 不可能出现；在较弱的内存序或没有正确同步的程序中，它可能出现。
 
-- 代码环境：
+## 结论边界
 
-1. C语言：gcc (x86_64-win32-seh-rev0, Built by MinGW-W64 project) 8.1.0
-    Copyright (C) 2018 Free Software Foundation, Inc.
-    This is free software; see the source for copying conditions.  There is NO
-    warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-2. Java： openjdk version "1.8.0_333"
-    OpenJDK Runtime Environment (build 1.8.0_333-b02)
-    OpenJDK 64-Bit Server VM (build 25.333-b02, mixed mode)
+观察到 `0/0` 只能说明两个线程都读到了旧值，不能单凭这个结果断言编译器交换了指令。相同结果还可能来自 CPU Store Buffer、缓存可见性或语言内存模型允许的行为。
 
-- 其它注意说明：C语言线程一代码里的空循环是为了“等待”线程二，在测试时，有时我几百次就能观察到指令重排，有时候几十万次才能观察到，很大一部分原因是因为线程一先启动，线程二后启动，所以要调节这里空循环的次数，让两个线程尽量做到同时启动，还有，运行代码时最好关闭优化，因为编译器可能会将这行空循环代码给优化掉，最后，运行C语言文件时候别忘了动态链接 -lpthread
+判断编译器是否重排，需要检查生成的汇编；研究 CPU 与语言内存序，应使用语言定义的原子操作和对照实验。旧版 C 示例使用 `volatile` 变量产生 data race，按 C 标准属于未定义行为，因此不能作为严谨证明。
 
-截图说明：
+## 当前实验
 
-1. JSR文档对volatile语义增强
+| 语言 | 实验组 | 对照组 | `0/0` 预期 |
+|---|---|---|---|
+| C11 | `memory_order_relaxed` | `memory_order_seq_cst` | relaxed 允许但不保证出现；seq_cst 禁止 |
+| Java | 普通 `a/b` 字段 | `volatile a/b` 字段 | 普通字段允许但不保证出现；volatile 禁止 |
 
-![JSR文档对volatile语义增强](https://sanxiadaba-pic.oss-cn-hangzhou.aliyuncs.com/img/msedge_oSK1GJ5lTJ.png)
+C 版本使用 C11 原子变量消除未定义行为。Java 版本把 `volatile` 放在真正在线程间竞争的 `a/b` 上；结果变量 `x/y` 由完成屏障安全发布给主线程。
 
- 2. C语言文档对volatile解释
+两个版本都：
 
-    ![](https://sanxiadaba-pic.oss-cn-hangzhou.aliyuncs.com/img/image-20230122154923326.png)
+- 只创建并复用两个工作线程；
+- 使用 `pthread_barrier_t` 或 `CyclicBarrier` 对齐每轮实验；
+- 在屏障后使用原子计数会合两个工作线程，不依赖机器相关的延时；
+- 使用固定迭代次数，不再无限运行；
+- 只输出四种结果的汇总统计，不逐轮打印；
+- 检查线程和屏障相关错误。
 
-3. C语言多线程观察到的指令重排
+屏障只放在每轮关键读写的前后，用来完成初始化和结果发布。原子会合点只确认两个工作线程均已就绪；它不会在随后两个线程的关键读写之间建立顺序。
 
-    ![consolepauser_1ARdn0W5p9](https://sanxiadaba-pic.oss-cn-hangzhou.aliyuncs.com/img/consolepauser_1ARdn0W5p9.png)
+## 构建与运行
 
-4. Java多线程观察到的指令重排
+### C11
 
-    ![idea64_5HV1IWx7tw](https://sanxiadaba-pic.oss-cn-hangzhou.aliyuncs.com/img/idea64_5HV1IWx7tw.png)
+```bash
+gcc test.c -std=c11 -O2 -pthread -Wall -Wextra -Werror -o test
+./test 100000
+```
+
+### Java
+
+```bash
+javac Test.java
+java Test 100000
+```
+
+迭代次数参数可省略，默认是 `100000`。弱内存结果具有概率性；某次没有观察到 `0/0`，不代表该内存模型禁止它。
+
+## 如何检查编译器输出
+
+例如生成 C 汇编：
+
+```bash
+gcc test.c -std=c11 -O2 -pthread -S -masm=intel -o test.s
+```
+
+汇编只能说明编译器生成了什么指令；仍需结合目标 CPU 架构和语言内存模型解释并发结果。
+
+## 历史资料
+
+- B 站视频：[98%开发者不了解的 volatile 关键字](https://www.bilibili.com/video/BV1SY4y1d7sv/)
+- `jsr133.pdf`：Java 内存模型相关资料
+- `ansi-iso-9899-1990-1.pdf`：C89 标准资料
