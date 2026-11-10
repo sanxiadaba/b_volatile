@@ -1,6 +1,6 @@
 # 构建产物
-sb
-sb.exe
+volatile
+volatile.exe
 *.o
 *.obj
 
