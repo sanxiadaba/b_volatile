@@ -1,0 +1,94 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  c:
+    name: C (${{ matrix.compiler }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+    steps:
+      - uses: actions/checkout@v4
+
+      # 刻意使用严格的 -std=c11：test.c 自己定义了 _GNU_SOURCE，
+      # 因此 glibc 会暴露 pthread_barrier_t。这条命令就是 README 里的命令。
+      - name: build
+        run: |
+          ${{ matrix.compiler }} test.c -std=c11 -O2 -pthread \
+            -Wall -Wextra -Werror -o test
+          ${{ matrix.compiler }} volatile_demo.c -std=c11 -O2 -pthread \
+            -Wall -Wextra -Werror -o volatile_demo
+          ${{ matrix.compiler }} test.c -std=c11 -O2 -pthread \
+            -Wall -Wextra -Werror -DFALSE_SHARING=1 -o test_fs
+
+      - name: run c11 atomics
+        run: ./test --iterations 20000 --repeat 2
+
+      - name: run false-sharing variant
+        run: ./test_fs --iterations 20000 --repeat 1
+
+      - name: run volatile demo (expected to be UB, only smoke test)
+        run: ./volatile_demo --iterations 2000
+
+      - name: smoke test cli errors
+        run: |
+          ! ./test --mode bogus
+          ! ./test -n 0
+          ./test --help > /dev/null
+          ./test --iterations 1000 --repeat 1 --csv | head -n 1
+
+  java:
+    name: Java (${{ matrix.java }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        java: ['8', '17', '21']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+
+      - name: build
+        run: javac -encoding UTF-8 Test.java
+
+      - name: run
+        run: java Test --iterations 20000 --repeat 2
+
+      - name: smoke test cli errors
+        run: |
+          ! java Test --mode bogus
+          ! java Test -n 0
+          java Test --iterations 1000 --repeat 1 --csv | head -n 1
+
+  windows:
+    name: Windows / MinGW-w64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: mingw-w64-x86_64-gcc
+
+      - name: build
+        shell: msys2 {0}
+        run: |
+          gcc test.c -std=c11 -O2 -pthread -Wall -Wextra -Werror -static -o test.exe
+          gcc volatile_demo.c -std=c11 -O2 -pthread -Wall -Wextra -Werror -static -o volatile_demo.exe
+
+      - name: run
+        shell: msys2 {0}
+        run: |
+          ./test.exe --iterations 20000 --repeat 1
+          ./volatile_demo.exe --iterations 1000

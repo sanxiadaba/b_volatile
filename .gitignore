@@ -1,0 +1,26 @@
+# 构建产物
+test
+test.exe
+test_fs
+test_fs.exe
+volatile_demo
+volatile_demo.exe
+test_pin
+test_pin.exe
+
+# 汇编与目标文件
+*.o
+*.obj
+*.s
+*.asm
+
+# Java
+*.class
+*.jar
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

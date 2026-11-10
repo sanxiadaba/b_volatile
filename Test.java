@@ -3,29 +3,71 @@ import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+/**
+ * Store Buffering litmus test —— Java 普通字段 / volatile 字段对照实验。
+ *
+ * <pre>
+ *   初始状态：a = 0, b = 0
+ *   线程 1                线程 2
+ *   a = 1                 b = 1
+ *   x = b                 y = a
+ * </pre>
+ *
+ * JMM 的 synchronizes-with 只由 volatile 访问等同步动作建立。volatile 字段上
+ * 的写与读构成全序（synchronization order），因此 volatile 组不可能出现
+ * (0, 0)；普通字段没有这个全序，允许出现。
+ *
+ * 结果变量 x/y 是普通字段，由 CyclicBarrier 的 happens-before 安全发布给主线程，
+ * 这正好演示了"屏障负责发布、volatile 负责同步"的分工。
+ *
+ * 用法：java Test [options] [iterations]
+ */
 public final class Test {
     private static final int DEFAULT_ITERATIONS = 100_000;
+    private static final int DEFAULT_REPEAT = 3;
+
+    private enum Mode {
+        PLAIN("plain"),
+        VOLATILE("volatile");
+
+        private final String label;
+
+        Mode(String label) {
+            this.label = label;
+        }
+
+        String label() {
+            return label;
+        }
+    }
 
     private abstract static class State {
         int x;
         int y;
 
-        final void reset() {
-            resetSharedVariables();
-            x = 0;
-            y = 0;
-        }
+        abstract String label();
 
         abstract void resetSharedVariables();
 
         abstract void runThread1();
 
         abstract void runThread2();
+
+        final void reset() {
+            resetSharedVariables();
+            x = 0;
+            y = 0;
+        }
     }
 
     private static final class PlainState extends State {
         private int a;
         private int b;
+
+        @Override
+        String label() {
+            return Mode.PLAIN.label();
+        }
 
         @Override
         void resetSharedVariables() {
@@ -49,6 +91,11 @@ public final class Test {
     private static final class VolatileState extends State {
         private volatile int a;
         private volatile int b;
+
+        @Override
+        String label() {
+            return Mode.VOLATILE.label();
+        }
 
         @Override
         void resetSharedVariables() {
@@ -89,12 +136,42 @@ public final class Test {
             }
         }
 
-        void print(String name, int iterations) {
-            System.out.printf("%s (%,d iterations)%n", name, iterations);
-            System.out.printf("  (0,0): %,d%n", zeroZero);
-            System.out.printf("  (0,1): %,d%n", zeroOne);
-            System.out.printf("  (1,0): %,d%n", oneZero);
-            System.out.printf("  (1,1): %,d%n", oneOne);
+        void add(OutcomeCounts other) {
+            zeroZero += other.zeroZero;
+            zeroOne += other.zeroOne;
+            oneZero += other.oneZero;
+            oneOne += other.oneOne;
+        }
+
+        String toCsvRow(String mode, int run, int iterations) {
+            return String.format("%s,%d,%d,%d,%d,%d,%d",
+                    mode, run, iterations, zeroZero, zeroOne, oneZero, oneOne);
+        }
+
+        String toLine(String mode, int run, int runs, int iterations) {
+            double percent = iterations == 0 ? 0.0 : 100.0 * zeroZero / iterations;
+            return String.format("%-8s run %d/%d  n=%d  (0,0)=%,d (%5.1f%%)"
+                            + "  (0,1)=%,d  (1,0)=%,d  (1,1)=%,d",
+                    mode, run, runs, iterations, zeroZero, percent,
+                    zeroOne, oneZero, oneOne);
+        }
+
+        String toTotalLine(String mode, int iterations) {
+            double percent = iterations == 0 ? 0.0 : 100.0 * zeroZero / iterations;
+            return String.format("%-8s total  n=%,d  (0,0)=%,d (%5.1f%%)"
+                            + "  (0,1)=%,d  (1,0)=%,d  (1,1)=%,d",
+                    mode, iterations, zeroZero, percent, zeroOne, oneZero, oneOne);
+        }
+    }
+
+    private static void spinRendezvous(AtomicInteger readyWorkers) {
+        readyWorkers.incrementAndGet();
+        int spins = 0;
+        while (readyWorkers.get() != 2) {
+            if (++spins == 1000) {
+                Thread.yield();
+                spins = 0;
+            }
         }
     }
 
@@ -107,21 +184,11 @@ public final class Test {
         OutcomeCounts counts = new OutcomeCounts();
 
         Thread firstThread = createWorker(
-                state::runThread1,
-                iterations,
-                startBarrier,
-                finishBarrier,
-                readyWorkers,
-                workerFailure,
-                "store-buffering-thread-1");
+                state::runThread1, iterations, startBarrier, finishBarrier,
+                readyWorkers, workerFailure, "store-buffering-thread-1");
         Thread secondThread = createWorker(
-                state::runThread2,
-                iterations,
-                startBarrier,
-                finishBarrier,
-                readyWorkers,
-                workerFailure,
-                "store-buffering-thread-2");
+                state::runThread2, iterations, startBarrier, finishBarrier,
+                readyWorkers, workerFailure, "store-buffering-thread-2");
 
         firstThread.start();
         secondThread.start();
@@ -134,10 +201,6 @@ public final class Test {
                 finishBarrier.await();
                 counts.record(state.x, state.y);
             }
-        } catch (InterruptedException | BrokenBarrierException exception) {
-            startBarrier.reset();
-            finishBarrier.reset();
-            throw exception;
         } finally {
             firstThread.join();
             secondThread.join();
@@ -163,7 +226,7 @@ public final class Test {
             try {
                 for (int iteration = 0; iteration < iterations; iteration++) {
                     startBarrier.await();
-                    rendezvousWorkers(readyWorkers);
+                    spinRendezvous(readyWorkers);
                     action.run();
                     finishBarrier.await();
                 }
@@ -180,51 +243,202 @@ public final class Test {
         }, name);
     }
 
-    private static void rendezvousWorkers(AtomicInteger readyWorkers) {
-        readyWorkers.incrementAndGet();
-        while (readyWorkers.get() != 2) {
-            // Intentional spin rendezvous; unlike a timed delay, this waits for the peer.
-        }
+    private static void printEnvironment(boolean csv, int iterations, int repeat) {
+        java.io.PrintStream stream = csv ? System.err : System.out;
+        stream.printf("# %s %s | %s %s | %d logical CPUs%n",
+                System.getProperty("os.name"),
+                System.getProperty("os.arch"),
+                System.getProperty("java.vm.name"),
+                System.getProperty("java.version"),
+                Runtime.getRuntime().availableProcessors());
+        stream.printf("# iterations per run: %,d | runs per mode: %d%n",
+                iterations, repeat);
     }
 
-    private static int parseIterations(String[] arguments) {
-        if (arguments.length == 0) {
-            return DEFAULT_ITERATIONS;
-        }
-        if (arguments.length != 1) {
-            throw new IllegalArgumentException("expected at most one argument");
-        }
-
-        int iterations = Integer.parseInt(arguments[0]);
-        if (iterations <= 0) {
-            throw new IllegalArgumentException("iteration count must be positive");
-        }
-        return iterations;
+    private static void printUsage() {
+        System.err.println("usage: java Test [options] [iterations]");
+        System.err.println();
+        System.err.println("Store Buffering litmus test (Java plain vs volatile fields).");
+        System.err.println();
+        System.err.println("options:");
+        System.err.println("  -n, --iterations N   iterations per run (default "
+                + DEFAULT_ITERATIONS + ")");
+        System.err.println("  -r, --repeat R       independent runs per mode (default "
+                + DEFAULT_REPEAT + ")");
+        System.err.println("  -m, --mode MODE      all | plain | volatile (default all)");
+        System.err.println("      --csv            machine readable output on stdout");
+        System.err.println("  -h, --help           show this help");
+        System.err.println();
+        System.err.println("exit status: 0 ok, 1 usage error, 2 volatile 观察到 (0,0)");
     }
 
-    public static void main(String[] arguments) throws Exception {
-        int iterations;
+    private static Integer parsePositive(String text, String what) {
         try {
-            iterations = parseIterations(arguments);
-        } catch (IllegalArgumentException exception) {
-            System.err.println("usage: java Test [positive-iteration-count]");
-            System.err.println(exception.getMessage());
+            int value = Integer.parseInt(text);
+            if (value <= 0) {
+                System.err.println(what + " must be positive: " + text);
+                return null;
+            }
+            return value;
+        } catch (NumberFormatException exception) {
+            System.err.println("invalid " + what + ": " + text);
+            return null;
+        }
+    }
+
+    public static void main(String[] arguments) {
+        int iterations = DEFAULT_ITERATIONS;
+        int repeat = DEFAULT_REPEAT;
+        boolean csv = false;
+        boolean allModes = true;
+        Mode singleMode = Mode.PLAIN;
+
+        for (int index = 0; index < arguments.length; index++) {
+            String argument = arguments[index];
+            String value = null;
+            String option = argument;
+
+            if (argument.startsWith("--") && argument.indexOf('=') > 0) {
+                int equals = argument.indexOf('=');
+                option = argument.substring(0, equals);
+                value = argument.substring(equals + 1);
+            }
+
+            if (option.equals("-h") || option.equals("--help")) {
+                printUsage();
+                return;
+            }
+            if (option.equals("--csv")) {
+                csv = true;
+                continue;
+            }
+            if (option.equals("-n") || option.equals("--iterations")
+                    || option.equals("-r") || option.equals("--repeat")
+                    || option.equals("-m") || option.equals("--mode")) {
+                if (value == null) {
+                    if (index + 1 >= arguments.length) {
+                        System.err.println(option + " requires a value");
+                        printUsage();
+                        System.exit(1);
+                        return;
+                    }
+                    value = arguments[++index];
+                }
+
+                if (option.equals("-n") || option.equals("--iterations")) {
+                    Integer parsed = parsePositive(value, "iteration count");
+                    if (parsed == null) {
+                        printUsage();
+                        System.exit(1);
+                        return;
+                    }
+                    iterations = parsed;
+                } else if (option.equals("-r") || option.equals("--repeat")) {
+                    Integer parsed = parsePositive(value, "repeat count");
+                    if (parsed == null) {
+                        printUsage();
+                        System.exit(1);
+                        return;
+                    }
+                    repeat = parsed;
+                } else if (value.equals("all")) {
+                    allModes = true;
+                } else if (value.equals("plain")) {
+                    allModes = false;
+                    singleMode = Mode.PLAIN;
+                } else if (value.equals("volatile")) {
+                    allModes = false;
+                    singleMode = Mode.VOLATILE;
+                } else {
+                    System.err.println("unknown mode: " + value);
+                    printUsage();
+                    System.exit(1);
+                    return;
+                }
+                continue;
+            }
+            if (argument.matches("[0-9]+")) {
+                Integer parsed = parsePositive(argument, "iteration count");
+                if (parsed == null) {
+                    System.exit(1);
+                    return;
+                }
+                iterations = parsed;
+                continue;
+            }
+
+            System.err.println("unknown option: " + argument);
+            printUsage();
             System.exit(1);
             return;
         }
 
-        OutcomeCounts plainCounts = runExperiment(new PlainState(), iterations);
-        OutcomeCounts volatileCounts = runExperiment(new VolatileState(), iterations);
-
-        plainCounts.print("Java plain fields", iterations);
-        volatileCounts.print("Java volatile fields", iterations);
-
-        if (volatileCounts.zeroZero != 0) {
-            throw new AssertionError("volatile fields observed the forbidden (0,0) outcome");
+        printEnvironment(csv, iterations, repeat);
+        if (csv) {
+            System.out.println("mode,run,iterations,zero_zero,zero_one,one_zero,one_one");
         }
-        if (plainCounts.zeroZero == 0) {
-            System.out.println(
-                    "NOTE: plain-field (0,0) is allowed but was not observed in this run.");
+
+        OutcomeCounts[] totals = {new OutcomeCounts(), new OutcomeCounts()};
+        int status = 0;
+
+        try {
+            for (int run = 0; run < repeat; run++) {
+                Mode[] order = allModes
+                        ? (run % 2 == 0
+                                ? new Mode[]{Mode.PLAIN, Mode.VOLATILE}
+                                : new Mode[]{Mode.VOLATILE, Mode.PLAIN})
+                        : new Mode[]{singleMode};
+
+                for (Mode mode : order) {
+                    State state = mode == Mode.PLAIN
+                            ? new PlainState()
+                            : new VolatileState();
+                    OutcomeCounts counts = runExperiment(state, iterations);
+
+                    totals[mode.ordinal()].add(counts);
+
+                    if (csv) {
+                        System.out.println(counts.toCsvRow(mode.label(), run + 1, iterations));
+                    } else {
+                        System.out.println(counts.toLine(mode.label(), run + 1, repeat, iterations));
+                    }
+
+                    if (mode == Mode.VOLATILE && counts.zeroZero != 0) {
+                        System.err.println(
+                                "FAIL: volatile fields observed the forbidden (0,0) outcome");
+                        status = 2;
+                    }
+                }
+            }
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            System.err.println("interrupted");
+            System.exit(1);
+            return;
+        } catch (BrokenBarrierException | IllegalStateException exception) {
+            System.err.println("experiment failed: " + exception);
+            System.exit(1);
+            return;
+        }
+
+        if (!csv) {
+            Mode[] printed = allModes ? new Mode[]{Mode.PLAIN, Mode.VOLATILE} : new Mode[]{singleMode};
+            for (Mode mode : printed) {
+                System.out.println(totals[mode.ordinal()].toTotalLine(mode.label(), iterations * repeat));
+            }
+            if (status == 0 && allModes) {
+                if (totals[Mode.PLAIN.ordinal()].zeroZero == 0) {
+                    System.out.println(
+                            "NOTE: plain-field (0,0) is allowed but was not observed in these runs.");
+                } else {
+                    System.out.println(
+                            "OK: plain fields produced (0,0), volatile fields never did.");
+                }
+            }
+        }
+
+        if (status != 0) {
+            System.exit(status);
         }
     }
 }
