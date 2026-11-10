@@ -1,74 +1,60 @@
-# Store Buffering / volatile 实验 —— 一页纸构建入口
+# Store Buffering litmus test —— 一页纸构建入口
 #
-#   make            # 构建 C 实验（test、test_fs、volatile_demo）
-#   make run        # 跑 C11 原子对照实验（100000 轮 × 3 次）
-#   make run-fs     # 同一实验，但 a/b 共享缓存行（对照）
-#   make asm        # 生成 test.s，自己看有没有 fence
-#   make java       # 编译 Test.java（需要 JDK）
-#   make run-java   # 跑 Java 对照实验
+#   make            # 构建 sb
+#   make run        # 跑 C 版（三种实现，各 100 万轮）
+#   make java       # 编译 Sb.java（需要 JDK，不是 JRE）
+#   make run-java   # 跑 Java 版
+#   make check      # 构建 + 小样本跑一遍，退出码非 0 就说明有问题
+#   make asm        # 生成 sb.s，自己看 relaxed 路径有没有 xchg/lock
 #   make clean
 #
-# Windows 上用 MinGW 的 make（mingw32-make 也可以）；Linux/macOS 用系统 make。
+# Windows 上用的是 MSYS2/xpack 那套 make，它背后是 sh，所以 rm 能直接用。
+# 想换编译器：make check CC=clang
 
 CC ?= gcc
-# make 内置的 CC 默认是 cc，而 Windows 上通常没有 cc.exe，这里做一次兜底。
+# make 内置的 CC 默认是 cc，Windows 上通常没有 cc.exe，这里兜底。
 ifeq ($(origin CC),default)
 CC := gcc
 endif
-CFLAGS ?= -std=c11 -O2 -Wall -Wextra -Werror
-PTHREAD := -pthread
+CFLAGS ?= -std=c11 -O2 -Wall -Wextra -Werror -pthread
+JAVAC ?= javac
 
 ifeq ($(OS),Windows_NT)
 EXE := .exe
+# 不加 -static 的话，产物依赖 libwinpthread-1.dll，换台机器直接起不来。
 STATIC := -static
 RUN :=
-JAVAC_ENC := -encoding UTF-8
-RM_CMD := del /Q
 else
 EXE :=
 STATIC :=
 RUN := ./
-JAVAC_ENC := -encoding UTF-8
-RM_CMD := rm -f
 endif
 
-BINARIES := test$(EXE) test_fs$(EXE) volatile_demo$(EXE)
+.PHONY: all run java run-java check asm clean
 
-.PHONY: all run run-fs run-demo asm java run-java clean
+all: sb$(EXE)
 
-all: test$(EXE) test_fs$(EXE) volatile_demo$(EXE)
+sb$(EXE): sb.c
+	$(CC) $(CFLAGS) $(STATIC) -o $@ $<
 
-test$(EXE): test.c
-	$(CC) $(CFLAGS) $(PTHREAD) $(STATIC) -o $@ $<
+run: sb$(EXE)
+	$(RUN)sb$(EXE) -n 1000000
 
-# 同一条代码路径，但 a/b 落在同一条缓存行上：用来观察 false sharing 对结果的影响。
-test_fs$(EXE): test.c
-	$(CC) $(CFLAGS) $(PTHREAD) $(STATIC) -DFALSE_SHARING=1 -o $@ $<
+java: Sb.class
 
-volatile_demo$(EXE): volatile_demo.c
-	$(CC) $(CFLAGS) $(PTHREAD) $(STATIC) -o $@ $<
+Sb.class: Sb.java
+	$(JAVAC) -encoding UTF-8 Sb.java
 
-test.s: test.c
-	$(CC) -std=c11 -O2 $(PTHREAD) -S -masm=intel -o $@ $<
+run-java: Sb.class
+	java Sb -n 1000000
 
-asm: test.s
+check: sb$(EXE)
+	$(RUN)sb$(EXE) -n 200000 -r 2
 
-run: test$(EXE)
-	$(RUN)test$(EXE) --iterations 100000 --repeat 3
+asm: sb.s
 
-run-fs: test_fs$(EXE)
-	$(RUN)test_fs$(EXE) --iterations 100000 --repeat 3
-
-run-demo: volatile_demo$(EXE)
-	$(RUN)volatile_demo$(EXE) --iterations 100000
-
-java: Test.class
-
-Test.class: Test.java
-	javac $(JAVAC_ENC) Test.java
-
-run-java: Test.class
-	java Test --iterations 100000 --repeat 3
+sb.s: sb.c
+	$(CC) -std=c11 -O2 -pthread -S -masm=intel -o $@ $<
 
 clean:
-	-$(RM_CMD) $(BINARIES) *.o *.class test.s vd.s
+	-$(RM) sb$(EXE) sb.s *.o *.class
