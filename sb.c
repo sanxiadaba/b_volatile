@@ -526,6 +526,7 @@ int main(int argc, char **argv)
            platform_name(), compiler_name(), cpu_count(),
            (unsigned int) (sizeof(void *) * 8U),
            (uintmax_t) options.iterations);
+    printf("# (x,y): x = 线程1读到的 b，y = 线程2读到的 a\n");
 
     if (options.all_impls || options.impl == IMPL_VOLATILE) {
         printf("# 注: volatile 模式整段程序是 data race（UB），"

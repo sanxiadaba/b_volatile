@@ -316,6 +316,7 @@ public final class Sb {
                 System.getProperty("os.name"), System.getProperty("os.arch"),
                 System.getProperty("java.vm.name"), System.getProperty("java.version"),
                 Runtime.getRuntime().availableProcessors(), iterations);
+        System.out.println("# (x,y): x = 线程1读到的 b，y = 线程2读到的 a");
 
         if (allModes || singleMode == Mode.PLAIN) {
             System.out.println("# 注: plain 模式在 JMM 里是 data race：合法，但读到 0 还是 1"
