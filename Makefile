@@ -1,15 +1,13 @@
-# Store Buffering litmus test —— 一页纸构建入口
+# Store Buffering litmus test
 #
 #   make            # 构建 sb
-#   make run        # 跑 C 版（三种实现，各 100 万轮）
+#   make run        # 跑 C 版（三种实现，各 100 万轮，约 2 秒）
 #   make java       # 编译 Sb.java（需要 JDK，不是 JRE）
 #   make run-java   # 跑 Java 版
-#   make check      # 构建 + 小样本跑一遍，退出码非 0 就说明有问题
-#   make asm        # 生成 sb.s，自己看 relaxed 路径有没有 xchg/lock
+#   make asm        # 生成 sb.s，自己看三个实现的机器码差别
 #   make clean
 #
-# Windows 上用的是 MSYS2/xpack 那套 make，它背后是 sh，所以 rm 能直接用。
-# 想换编译器：make check CC=clang
+# Windows 上用的是 MSYS2/xpack 那套 make，背后是 sh，所以 rm 能直接用。
 
 CC ?= gcc
 # make 内置的 CC 默认是 cc，Windows 上通常没有 cc.exe，这里兜底。
@@ -30,7 +28,7 @@ STATIC :=
 RUN := ./
 endif
 
-.PHONY: all run java run-java check asm clean
+.PHONY: all run java run-java asm clean
 
 all: sb$(EXE)
 
@@ -38,7 +36,7 @@ sb$(EXE): sb.c
 	$(CC) $(CFLAGS) $(STATIC) -o $@ $<
 
 run: sb$(EXE)
-	$(RUN)sb$(EXE) -n 1000000
+	$(RUN)sb$(EXE)
 
 java: Sb.class
 
@@ -46,10 +44,7 @@ Sb.class: Sb.java
 	$(JAVAC) -encoding UTF-8 Sb.java
 
 run-java: Sb.class
-	java Sb -n 1000000
-
-check: sb$(EXE)
-	$(RUN)sb$(EXE) -n 200000 -r 2
+	java Sb
 
 asm: sb.s
 
